@@ -98,32 +98,47 @@ Finally, I replicated the Surrogate Keys technique from step 4, creating the `pr
 **The Problem:** The central table needed to display the updated price ("Current Price") of any item. Since items and currencies are separated into two fact tables, a simple measure wouldn't work.
 **The Solution:** I created a smart measure using the `COALESCE` function, which tries to fetch the last date and value in the items table; if it returns blank, it searches the currency table.
 ```dax
-Current Price (Chaos) =
+Current Price (Chaos) = 
 VAR LastItemDate = MAX('fItems'[date])
 VAR ItemPrice = CALCULATE(
     AVERAGE('fItems'[value]),
     'fItems'[date] = LastItemDate
 )
+
 VAR LastCurrencyDate = MAX('fCurrency'[date])
 VAR CurrencyPrice = CALCULATE(
     AVERAGE('fCurrency'[value]),
     'fCurrency'[date] = LastCurrencyDate
 )
-RETURN COALESCE(ItemPrice, CurrencyPrice)
+
+RETURN
+COALESCE(ItemPrice, CurrencyPrice)
 ```
 
 ### 8. Time Intelligence & Trends (7-Day Sparklines)
 **The Problem:** Power BI's native Sparkline feature draws a line using the entire available data history. The UI goal was to replicate the "Last 7 Days" view starting from the last recorded date of each item.
 **The Solution:** I developed a DAX measure with time-window logic. The code sets an anchor on the item's last day, tests if the current X-axis date is within the 7-day window, and returns `BLANK()` for older dates. This "crops" the native Power BI chart, forcing it to display only the recent trend.
 ```dax
-Historical Price (7 days) =
+Historical Price (7 days) = 
 VAR LastItemDate = CALCULATE(MAX('fItems'[date]), REMOVEFILTERS('dCalendar'))
 VAR LastCurrDate = CALCULATE(MAX('fCurrency'[date]), REMOVEFILTERS('dCalendar'))
+
 VAR CurrentSparklineDate = MAX('dCalendar'[date])
+
 VAR IsValidItemDate = CurrentSparklineDate >= (LastItemDate - 6) && CurrentSparklineDate <= LastItemDate
 VAR IsValidCurrDate = CurrentSparklineDate >= (LastCurrDate - 6) && CurrentSparklineDate <= LastCurrDate
-VAR ItemVal = IF(IsValidItemDate, AVERAGE('fItems'[value]), BLANK())
-VAR CurrVal = IF(IsValidCurrDate, AVERAGE('fCurrency'[value]), BLANK())
+
+VAR ItemVal = 
+    IF(IsValidItemDate, 
+        CALCULATE(AVERAGE('fItems'[value]), ALL('fItems'[confidence])), // ALL quebra o bloqueio visual
+        BLANK()
+    )
+VAR CurrVal = 
+    IF(IsValidCurrDate, 
+        CALCULATE(AVERAGE('fCurrency'[value]), ALL('fCurrency'[confidence])), // ALL quebra o bloqueio visual
+        BLANK()
+    )
+
 RETURN COALESCE(ItemVal, CurrVal)
 ```
 
@@ -131,14 +146,29 @@ RETURN COALESCE(ItemVal, CurrVal)
 **The Mathematical and Visual Challenge:** I needed to calculate the exact weekly growth and group this visually with the sparkline. Power BI does not allow merging header cells.
 **The Solution (DAX):** I created a measure retrieving the current value and comparing it with the value from exactly 7 days ago using `CALCULATE`, joining items and currencies with `COALESCE`.
 ```dax
-7 days Change % =
+7 days Change % = 
 VAR CurrentVal = [Current Price (Chaos)]
+
 VAR LastItemDate = CALCULATE(MAX('fItems'[date]))
-VAR OldItemVal = CALCULATE(AVERAGE('fItems'[value]), 'fItems'[date] = LastItemDate - 7)
+VAR OldItemVal = 
+    CALCULATE(
+        AVERAGE('fItems'[value]), 
+        'fItems'[date] = LastItemDate - 6,
+        REMOVEFILTERS('fItems'[confidence])
+    )
+
 VAR LastCurrDate = CALCULATE(MAX('fCurrency'[date]))
-VAR OldCurrVal = CALCULATE(AVERAGE('fCurrency'[value]), 'fCurrency'[date] = LastCurrDate - 7)
+VAR OldCurrVal = 
+    CALCULATE(
+        AVERAGE('fCurrency'[value]), 
+        'fCurrency'[date] = LastCurrDate - 6,
+        REMOVEFILTERS('fCurrency'[confidence])
+    )
+
 VAR OldVal = COALESCE(OldItemVal, OldCurrVal)
-RETURN DIVIDE(CurrentVal - OldVal, OldVal)
+
+RETURN
+DIVIDE(CurrentVal - OldVal, OldVal)
 ```
 **The Solution (UI/UX):** For the GUI, I applied the "Ghost Header" trick: renamed the percentage column to "Last 7 days" and the sparkline column with a space character (empty). I aligned the values on opposite ends and moved the columns closer, tricking the user's vision into seeing a single grouped section. Lastly, I used Custom conditional formatting (`+#,0%;-#,0%;0%`) to add the "+" sign and green/red colors.
 
@@ -161,9 +191,11 @@ END;
 **The Problem:** To create a dynamic currency conversion filter (Chaos to Divines), the dashboard needed to know the exact rate of the "Divine Orb" every day. However, calculating this in the central table broke the row context when passing through normal items.
 **The Solution:** I created an anchor measure using `REMOVEFILTERS`. This forces Power BI to ignore the specific row the table is reading and fetch the absolute value of the Divine Orb on the most recent available date, serving as a global variable.
 ```dax
-Divine Price in Chaos =
+Divine Price in Chaos = 
 VAR CurrentDate = CALCULATE(MAX('fCurrency'[date]), REMOVEFILTERS('dproduct'))
-RETURN CALCULATE(
+
+RETURN
+CALCULATE(
     AVERAGE('fCurrency'[value]),
     'dproduct'[product_name] = "Divine Orb",
     'fCurrency'[date] = CurrentDate,
@@ -179,33 +211,55 @@ RETURN CALCULATE(
 **The Problem:** The price display needed to obey complex rules of the game's economy: dynamic conversion, formatting Chaos as integers and Divines with decimals, inverting logic for cheap currencies, and treating the "Divine Orb" itself as an exception.
 **The Solution:** I developed a robust DAX measure combining `SELECTEDVALUE`, fraction math, and the `FORMAT` function. The `SWITCH` statement acts as the final router.
 ```dax
-Dynamic Price (Display) =
-VAR SelectedDisplay = SELECTEDVALUE('ValueDisplay'[Display Option], "Adaptive")
-VAR CurrentGroup = MAX('dproduct'[ui_group])
+Dynamic Price (Display) = 
+VAR SelectedDisplay = SELECTEDVALUE('_UI_ValueDisplay'[Display Option], "Adaptive")
+
 VAR CurrentItem = MAX('dproduct'[product_name])
+
 VAR PriceInChaos = [Current Price (Chaos)]
 VAR DivineAnchor = [Divine Price in Chaos]
-VAR PriceInDivines = DIVIDE(PriceInChaos, DivineAnchor)
+
+VAR PriceInDivines = DIVIDE(PriceInChaos, DivineAnchor) 
 VAR AmountPerDivine = DIVIDE(DivineAnchor, PriceInChaos)
-VAR TextChaos = FORMAT(PriceInChaos, "#,##0") & " c"
-VAR TextDivine =
-    IF(CurrentItem = "Divine Orb",
-        TextChaos,
+
+VAR IsWholeDivine = ROUND(PriceInDivines, 1) = INT(ROUND(PriceInDivines, 1))
+VAR DivineFormat = IF(IsWholeDivine, "#,##0", "#,##0.0")
+
+VAR InvertedPrice = DIVIDE(1, PriceInChaos)
+VAR IsWholeInverted = ROUND(InvertedPrice, 1) = INT(ROUND(InvertedPrice, 1))
+VAR InvertedFormat = IF(IsWholeInverted, "#,##0", "#,##0.0")
+
+VAR TextChaos = 
+    IF(PriceInChaos < 1 && PriceInChaos > 0,
+        "1 c = " & FORMAT(InvertedPrice, InvertedFormat),
+        FORMAT(PriceInChaos, "#,##0") & " c"
+    )
+
+VAR TextDivine = 
+    IF(CurrentItem = "Divine Orb", 
+        TextChaos, 
         IF(PriceInChaos >= DivineAnchor,
-            FORMAT(PriceInDivines, "#,##0.0") & " div",
+            FORMAT(PriceInDivines, DivineFormat) & " div",
             "1 div = " & FORMAT(AmountPerDivine, "#,##0")
         )
     )
-VAR TextAdaptive =
-    IF(CurrentItem = "Divine Orb",
-        TextChaos,
-        IF(PriceInChaos >= DivineAnchor,
-            FORMAT(PriceInDivines, "#,##0.0") & " div",
-            FORMAT(PriceInChaos, "#,##0") & " c"
+
+VAR TextAdaptive = 
+    IF(CurrentItem = "Divine Orb", 
+        TextChaos, 
+        IF(PriceInChaos >= DivineAnchor, 
+            FORMAT(PriceInDivines, DivineFormat) & " div", 
+            IF(PriceInChaos < 1 && PriceInChaos > 0,
+                "1 c = " & FORMAT(InvertedPrice, InvertedFormat),
+                FORMAT(PriceInChaos, "#,##0") & " c"
+            )
         )
     )
-VAR FinalDisplay = IF(CurrentGroup = "General", SelectedDisplay, "Adaptive")
-RETURN SWITCH(
+
+VAR FinalDisplay = SelectedDisplay
+
+RETURN
+SWITCH(
     FinalDisplay,
     "Chaos", TextChaos,
     "Divine", TextDivine,
@@ -223,35 +277,55 @@ RETURN SWITCH(
 **The Solution:** I created math checks using `INT(ROUND())` and applied conditional IF blocks to invert the division.
 **15.1 - Dynamic Measure:**
 ```dax
-Dynamic Price (Display) =
-VAR SelectedDisplay = SELECTEDVALUE('ValueDisplay'[Display Option], "Adaptive")
-VAR CurrentGroup = MAX('dproduct'[ui_group])
+Dynamic Price (Display) = 
+VAR SelectedDisplay = SELECTEDVALUE('_UI_ValueDisplay'[Display Option], "Adaptive")
+
 VAR CurrentItem = MAX('dproduct'[product_name])
+
 VAR PriceInChaos = [Current Price (Chaos)]
 VAR DivineAnchor = [Divine Price in Chaos]
-VAR PriceInDivines = DIVIDE(PriceInChaos, DivineAnchor)
+
+VAR PriceInDivines = DIVIDE(PriceInChaos, DivineAnchor) 
 VAR AmountPerDivine = DIVIDE(DivineAnchor, PriceInChaos)
+
 VAR IsWholeDivine = ROUND(PriceInDivines, 1) = INT(ROUND(PriceInDivines, 1))
 VAR DivineFormat = IF(IsWholeDivine, "#,##0", "#,##0.0")
-VAR TextChaos = FORMAT(PriceInChaos, "#,##0") & " c"
-VAR TextDivine =
-    IF(CurrentItem = "Divine Orb",
-        TextChaos,
+
+VAR InvertedPrice = DIVIDE(1, PriceInChaos)
+VAR IsWholeInverted = ROUND(InvertedPrice, 1) = INT(ROUND(InvertedPrice, 1))
+VAR InvertedFormat = IF(IsWholeInverted, "#,##0", "#,##0.0")
+
+VAR TextChaos = 
+    IF(PriceInChaos < 1 && PriceInChaos > 0,
+        "1 c = " & FORMAT(InvertedPrice, InvertedFormat),
+        FORMAT(PriceInChaos, "#,##0") & " c"
+    )
+
+VAR TextDivine = 
+    IF(CurrentItem = "Divine Orb", 
+        TextChaos, 
         IF(PriceInChaos >= DivineAnchor,
             FORMAT(PriceInDivines, DivineFormat) & " div",
             "1 div = " & FORMAT(AmountPerDivine, "#,##0")
         )
     )
-VAR TextAdaptive =
-    IF(CurrentItem = "Divine Orb",
-        TextChaos,
-        IF(PriceInChaos >= DivineAnchor,
-            FORMAT(PriceInDivines, DivineFormat) & " div",
-            FORMAT(PriceInChaos, "#,##0") & " c"
+
+VAR TextAdaptive = 
+    IF(CurrentItem = "Divine Orb", 
+        TextChaos, 
+        IF(PriceInChaos >= DivineAnchor, 
+            FORMAT(PriceInDivines, DivineFormat) & " div", 
+            IF(PriceInChaos < 1 && PriceInChaos > 0,
+                "1 c = " & FORMAT(InvertedPrice, InvertedFormat),
+                FORMAT(PriceInChaos, "#,##0") & " c"
+            )
         )
     )
-VAR FinalDisplay = IF(CurrentGroup = "General", SelectedDisplay, "Adaptive")
-RETURN SWITCH(
+
+VAR FinalDisplay = SelectedDisplay
+
+RETURN
+SWITCH(
     FinalDisplay,
     "Chaos", TextChaos,
     "Divine", TextDivine,
@@ -261,16 +335,21 @@ RETURN SWITCH(
 ```
 **15.2 - Detail Cards:**
 ```dax
-Detail Card (Divine Price) =
+Detail Card (Divine Price) = 
 VAR PriceChaos = [Current Price (Chaos)]
 VAR DivineAnchor = [Divine Price in Chaos]
+
 VAR PriceDivine = DIVIDE(PriceChaos, DivineAnchor)
 VAR AmountPerDivine = DIVIDE(DivineAnchor, PriceChaos)
+
 VAR CurrentItem = MAX('dproduct'[product_name])
+
 VAR IsWholeDivine = ROUND(PriceDivine, 1) = INT(ROUND(PriceDivine, 1))
 VAR DivineFormat = IF(IsWholeDivine, "#,##0", "#,##0.0")
+
 VAR IsWholeAmount = ROUND(AmountPerDivine, 1) = INT(ROUND(AmountPerDivine, 1))
 VAR AmountFormat = IF(IsWholeAmount, "#,##0", "#,##0.0")
+
 RETURN
 IF(
     CurrentItem = "Divine Orb",
@@ -323,30 +402,50 @@ UNION(
 )
 ```
 ```dax
-Compare Price (Chaos) =
-VAR SelectedCompareLeague = SELECTEDVALUE('CompareLeague'[league_name])
-VAR Result = CALCULATE(
+Compare Price (Chaos) = 
+VAR SelectedCompareLeague = SELECTEDVALUE('_UI_CompareLeague'[league_name])
+
+VAR Result = 
+CALCULATE(
     [Current Price (Chaos)],
     REMOVEFILTERS('dleague'),
     'dleague'[league_name] = SelectedCompareLeague
 )
-RETURN IF(SelectedCompareLeague = " None" || ISBLANK(SelectedCompareLeague), BLANK(), Result)
+
+RETURN
+IF(SelectedCompareLeague = " None" || ISBLANK(SelectedCompareLeague), BLANK(), Result)
 ```
 
 ### 19. Senior UX: Smart Filters (Gatekeeper)
 **The Problem:** The comparison Dropdown showed leagues where the filtered item didn't even exist, generating "Dead Ends".
 **The Solution:** I created an invisible "Support Measure" acting as a boolean rule evaluating if the Dropdown league matches the original page league, and using `COUNTROWS` to check for records. I applied this to the visual filter pane to hide invalid options.
 ```dax
-Filter (Valid Compare League) =
-VAR SlicerLeague = MAX('CompareLeague'[league_name])
+Filter (Valid Compare League) = 
+VAR SlicerLeague = MAX('_UI_CompareLeague'[league_name])
+// Captura a liga original que o usuário trouxe pelo Drill-through
 VAR OriginalLeague = SELECTEDVALUE('dleague'[league_name])
-VAR CheckItems = CALCULATE(COUNTROWS('fItems'), REMOVEFILTERS('dleague'), 'dleague'[league_name] = SlicerLeague)
-VAR CheckCurrency = CALCULATE(COUNTROWS('fCurrency'), REMOVEFILTERS('dleague'), 'dleague'[league_name] = SlicerLeague)
+
+VAR CheckItems = 
+    CALCULATE(
+        COUNTROWS('fItems'),
+        REMOVEFILTERS('dleague'),
+        'dleague'[league_name] = SlicerLeague
+    )
+    
+VAR CheckCurrency = 
+    CALCULATE(
+        COUNTROWS('fCurrency'),
+        REMOVEFILTERS('dleague'),
+        'dleague'[league_name] = SlicerLeague
+    )
+
 RETURN
 IF(
-    SlicerLeague = " None", 1,
+    SlicerLeague = " None", 
+    1, 
     IF(
-        SlicerLeague = OriginalLeague, 0,
+        SlicerLeague = OriginalLeague, // Se for a mesma liga do Drill-through...
+        0,                             // ...toma nota 0 e some do Dropdown.
         IF(CheckItems > 0 || CheckCurrency > 0, 1, 0)
     )
 )
@@ -356,24 +455,53 @@ IF(
 **The Problem:** Displaying the highest and lowest price an item has ever reached. Basic `MAX()` functions don't work on dynamic measures, and `MIN()` could capture blank days.
 **The Solution:** I used iterator functions (`MAXX` and `MINX`) with security layers (`FILTER`) to ignore days without listings.
 ```dax
-Highest Price (Display) =
-VAR MaxPrice = MAXX(VALUES('dleagueday'[day_index]), [Current Price (Chaos)])
+Highest Price (Display) = 
+VAR MaxPrice = 
+    MAXX(
+        VALUES('dleagueday'[day_index]),
+        [Current Price (Chaos)]
+    )
 VAR InvertedPrice = DIVIDE(1, MaxPrice)
-RETURN IF(ISBLANK(MaxPrice), BLANK(),
-    IF(MaxPrice < 1 && MaxPrice > 0,
-        "1 Chaos = " & FORMAT(InvertedPrice, "#,##0.#") & " units",
-        FORMAT(MaxPrice, "#,##0") & " Chaos"
+
+VAR IsWholeInverted = ROUND(InvertedPrice, 1) = INT(ROUND(InvertedPrice, 1))
+VAR InvertedFormat = IF(IsWholeInverted, "#,##0", "#,##0.0")
+
+VAR IsWholePrice = ROUND(MaxPrice, 1) = INT(ROUND(MaxPrice, 1))
+VAR PriceFormat = IF(IsWholePrice, "#,##0", "#,##0.0")
+
+RETURN
+IF(ISBLANK(MaxPrice), BLANK(),
+    IF(
+        MaxPrice < 1 && MaxPrice > 0,
+        "1 Chaos = " & FORMAT(InvertedPrice, InvertedFormat) & " units",
+        FORMAT(MaxPrice, PriceFormat) & " Chaos"
     )
 )
 ```
 ```dax
-Lowest Price (Display) =
-VAR MinPrice = MINX(FILTER(VALUES('dleagueday'[day_index]), NOT ISBLANK([Current Price (Chaos)])), [Current Price (Chaos)])
+Lowest Price (Display) = 
+VAR MinPrice = 
+    MINX(
+        FILTER(
+            VALUES('dleagueday'[day_index]),
+            NOT ISBLANK([Current Price (Chaos)])
+        ),
+        [Current Price (Chaos)]
+    )
 VAR InvertedPrice = DIVIDE(1, MinPrice)
-RETURN IF(ISBLANK(MinPrice), BLANK(),
-    IF(MinPrice < 1 && MinPrice > 0,
-        "1 Chaos = " & FORMAT(InvertedPrice, "#,##0.#") & " units",
-        FORMAT(MinPrice, "#,##0") & " Chaos"
+
+VAR IsWholeInverted = ROUND(InvertedPrice, 1) = INT(ROUND(InvertedPrice, 1))
+VAR InvertedFormat = IF(IsWholeInverted, "#,##0", "#,##0.0")
+
+VAR IsWholePrice = ROUND(MinPrice, 1) = INT(ROUND(MinPrice, 1))
+VAR PriceFormat = IF(IsWholePrice, "#,##0", "#,##0.0")
+
+RETURN
+IF(ISBLANK(MinPrice), BLANK(),
+    IF(
+        MinPrice < 1 && MinPrice > 0,
+        "1 Chaos = " & FORMAT(InvertedPrice, InvertedFormat) & " units",
+        FORMAT(MinPrice, PriceFormat) & " Chaos"
     )
 )
 ```
@@ -382,15 +510,32 @@ RETURN IF(ISBLANK(MinPrice), BLANK(),
 **The Problem:** In-game prices suffer from weekend "noise" (demand spikes).
 **The Solution:** I created a DAX "Time Machine." The variable creates a dynamic 3-day window using `FILTER` and `ALL`. Then, `AVERAGEX` calculates the price average for that window.
 ```dax
-Moving Average 3 days (Chaos) =
+Moving Average 3 days (Chaos) = 
 VAR CurrentDay = MAX('dleagueday'[day_index])
-VAR Window3Days = FILTER(ALL('dleagueday'), 'dleagueday'[day_index] <= CurrentDay && 'dleagueday'[day_index] >= CurrentDay - 2)
-RETURN AVERAGEX(Window3Days, [Current Price (Chaos)])
+
+VAR Window3Days = 
+    FILTER(
+        ALL('dleagueday'),
+        'dleagueday'[day_index] <= CurrentDay &&
+        'dleagueday'[day_index] >= CurrentDay - 2
+    )
+
+RETURN
+AVERAGEX(
+    Window3Days,
+    [Current Price (Chaos)]
+)
 ```
 ```dax
-Dynamic Moving Average =
+Dynamic Moving Average = 
 VAR UserChoice = SELECTEDVALUE('_UI_ToggleTrend'[Option], "Hide Trend")
-RETURN IF(UserChoice = "Show Trend", [Moving Average 3 days (Chaos)], BLANK())
+
+RETURN
+IF(
+    UserChoice = "Show Trend",
+    [Moving Average 3 days (Chaos)],
+    BLANK()
+)
 ```
 
 ### 22. Data QA and the VertiPaq Engine (The Optimization that didn't happen)
@@ -415,11 +560,18 @@ RETURN IF(
 **The Problem:** The Tooltip Date stayed "frozen" on the league's last day.
 **The Solution:** Understanding Star Schema "Filter Direction". The X-axis filtered the Fact tables, but didn't flow upstream to the Calendar. I rewrote the Tooltip date to pull directly from the filtered fact tables using `COALESCE`, unfreezing the visual.
 ```dax
-Tooltip Date =
+Tooltip Date = 
 VAR ItemDate = MAX('fItems'[date])
 VAR CurrencyDate = MAX('fCurrency'[date])
+
 VAR CurrentDate = COALESCE(ItemDate, CurrencyDate)
-RETURN IF(ISBLANK(CurrentDate), BLANK(), FORMAT(CurrentDate, "ddd MMM dd yyyy"))
+
+RETURN
+IF(
+    ISBLANK(CurrentDate), 
+    BLANK(), 
+    FORMAT(CurrentDate, "ddd MMM dd yyyy")
+)
 ```
 
 ### 25. Interaction Control (Shielding Cards)
@@ -569,32 +721,47 @@ Por fim, repliquei a técnica de Surrogate Keys do passo 4, criando a coluna `pr
 **O Problema:** A tabela central precisava exibir o preço atualizado ("Preço Atual") de qualquer item. Como os itens e as moedas estão separados em duas tabelas fato (`fItems` e `fCurrency`), uma medida simples não funcionaria.
 **A Solução:** Criei uma medida inteligente usando a função `COALESCE`, que tenta buscar a última data e o último valor na tabela de itens; se retornar vazio, ela busca na tabela de moedas.
 ```dax
-Current Price (Chaos) =
+Current Price (Chaos) = 
 VAR LastItemDate = MAX('fItems'[date])
 VAR ItemPrice = CALCULATE(
     AVERAGE('fItems'[value]),
     'fItems'[date] = LastItemDate
 )
+
 VAR LastCurrencyDate = MAX('fCurrency'[date])
 VAR CurrencyPrice = CALCULATE(
     AVERAGE('fCurrency'[value]),
     'fCurrency'[date] = LastCurrencyDate
 )
-RETURN COALESCE(ItemPrice, CurrencyPrice)
+
+RETURN
+COALESCE(ItemPrice, CurrencyPrice)
 ```
 
 ### 8. Inteligência de Tempo e Tendências (Sparklines de 7 Dias)
 **O Problema:** O recurso nativo de Minigráfico (Sparkline) do Power BI desenha uma linha usando todo o histórico de dados disponível. O objetivo da UI era replicar a visão de "Últimos 7 Dias" a partir da última data registrada de cada item.
 **A Solução:** Desenvolvi uma medida DAX com lógica de janela de tempo. O código cria uma âncora no último dia do item, testa se a data do eixo X atual está dentro da janela de 7 dias e retorna `BLANK()` para datas mais antigas. Isso "corta" o gráfico nativo do Power BI, forçando-o a exibir apenas a tendência recente.
 ```dax
-Historical Price (7 days) =
+Historical Price (7 days) = 
 VAR LastItemDate = CALCULATE(MAX('fItems'[date]), REMOVEFILTERS('dCalendar'))
 VAR LastCurrDate = CALCULATE(MAX('fCurrency'[date]), REMOVEFILTERS('dCalendar'))
+
 VAR CurrentSparklineDate = MAX('dCalendar'[date])
+
 VAR IsValidItemDate = CurrentSparklineDate >= (LastItemDate - 6) && CurrentSparklineDate <= LastItemDate
 VAR IsValidCurrDate = CurrentSparklineDate >= (LastCurrDate - 6) && CurrentSparklineDate <= LastCurrDate
-VAR ItemVal = IF(IsValidItemDate, AVERAGE('fItems'[value]), BLANK())
-VAR CurrVal = IF(IsValidCurrDate, AVERAGE('fCurrency'[value]), BLANK())
+
+VAR ItemVal = 
+    IF(IsValidItemDate, 
+        CALCULATE(AVERAGE('fItems'[value]), ALL('fItems'[confidence])), // ALL quebra o bloqueio visual
+        BLANK()
+    )
+VAR CurrVal = 
+    IF(IsValidCurrDate, 
+        CALCULATE(AVERAGE('fCurrency'[value]), ALL('fCurrency'[confidence])), // ALL quebra o bloqueio visual
+        BLANK()
+    )
+
 RETURN COALESCE(ItemVal, CurrVal)
 ```
 
@@ -602,14 +769,29 @@ RETURN COALESCE(ItemVal, CurrVal)
 **O Desafio Matemático e Visual:** Precisava calcular o crescimento exato da semana e agrupar isso visualmente com o minigráfico. O Power BI não permite mesclar células de cabeçalho.
 **A Solução (DAX):** Criei uma medida resgatando o valor atual e comparando com o valor de exatos 7 dias atrás usando `CALCULATE`, unindo itens e moedas com `COALESCE`.
 ```dax
-7 days Change % =
+7 days Change % = 
 VAR CurrentVal = [Current Price (Chaos)]
+
 VAR LastItemDate = CALCULATE(MAX('fItems'[date]))
-VAR OldItemVal = CALCULATE(AVERAGE('fItems'[value]), 'fItems'[date] = LastItemDate - 7)
+VAR OldItemVal = 
+    CALCULATE(
+        AVERAGE('fItems'[value]), 
+        'fItems'[date] = LastItemDate - 6,
+        REMOVEFILTERS('fItems'[confidence])
+    )
+
 VAR LastCurrDate = CALCULATE(MAX('fCurrency'[date]))
-VAR OldCurrVal = CALCULATE(AVERAGE('fCurrency'[value]), 'fCurrency'[date] = LastCurrDate - 7)
+VAR OldCurrVal = 
+    CALCULATE(
+        AVERAGE('fCurrency'[value]), 
+        'fCurrency'[date] = LastCurrDate - 6,
+        REMOVEFILTERS('fCurrency'[confidence])
+    )
+
 VAR OldVal = COALESCE(OldItemVal, OldCurrVal)
-RETURN DIVIDE(CurrentVal - OldVal, OldVal)
+
+RETURN
+DIVIDE(CurrentVal - OldVal, OldVal)
 ```
 **A Solução (UI/UX):** Para a interface gráfica, apliquei o truque do "Cabeçalho Fantasma": renomeei a coluna de porcentagem para "Last 7 days" e a coluna do minigráfico com um caractere de espaço (vazio). Alinhei os valores nas extremidades opostas e aproximei as colunas, enganando a visão do usuário para parecer uma única seção agrupada. Por fim, usei formatação condicional Custom (`+#,0%;-#,0%;0%`) para adicionar o sinal de "+" e as cores verde/vermelho.
 
@@ -632,9 +814,11 @@ END;
 **O Problema:** Para criar um filtro dinâmico de conversão de moedas (Chaos para Divines), o dashboard precisava saber a cotação exata da "Divine Orb" a cada dia. No entanto, ao calcular isso na tabela central, o contexto de linha quebrava a medida quando ela passava por itens normais (como equipamentos), pois eles não existem na tabela de moedas.
 **A Solução:** Criei uma medida âncora utilizando `REMOVEFILTERS`. Isso força o Power BI a ignorar a linha específica que a tabela está lendo e buscar o valor absoluto da Divine Orb na data mais recente disponível, servindo como uma variável global para o dashboard inteiro.
 ```dax
-Divine Price in Chaos =
+Divine Price in Chaos = 
 VAR CurrentDate = CALCULATE(MAX('fCurrency'[date]), REMOVEFILTERS('dproduct'))
-RETURN CALCULATE(
+
+RETURN
+CALCULATE(
     AVERAGE('fCurrency'[value]),
     'dproduct'[product_name] = "Divine Orb",
     'fCurrency'[date] = CurrentDate,
@@ -650,33 +834,55 @@ RETURN CALCULATE(
 **O Problema:** A exibição do preço precisava obedecer regras complexas da economia do jogo: converter valores dinamicamente, formatar Chaos inteiros e Divines com decimais, inverter a lógica para moedas baratas e tratar a própria "Divine Orb" como exceção.
 **A Solução:** Desenvolvi uma medida DAX robusta combinando `SELECTEDVALUE`, matemática de fração e a função `FORMAT`. O `SWITCH` atua como roteador final.
 ```dax
-Dynamic Price (Display) =
-VAR SelectedDisplay = SELECTEDVALUE('ValueDisplay'[Display Option], "Adaptive")
-VAR CurrentGroup = MAX('dproduct'[ui_group])
+Dynamic Price (Display) = 
+VAR SelectedDisplay = SELECTEDVALUE('_UI_ValueDisplay'[Display Option], "Adaptive")
+
 VAR CurrentItem = MAX('dproduct'[product_name])
+
 VAR PriceInChaos = [Current Price (Chaos)]
 VAR DivineAnchor = [Divine Price in Chaos]
-VAR PriceInDivines = DIVIDE(PriceInChaos, DivineAnchor)
+
+VAR PriceInDivines = DIVIDE(PriceInChaos, DivineAnchor) 
 VAR AmountPerDivine = DIVIDE(DivineAnchor, PriceInChaos)
-VAR TextChaos = FORMAT(PriceInChaos, "#,##0") & " c"
-VAR TextDivine =
-    IF(CurrentItem = "Divine Orb",
-        TextChaos,
+
+VAR IsWholeDivine = ROUND(PriceInDivines, 1) = INT(ROUND(PriceInDivines, 1))
+VAR DivineFormat = IF(IsWholeDivine, "#,##0", "#,##0.0")
+
+VAR InvertedPrice = DIVIDE(1, PriceInChaos)
+VAR IsWholeInverted = ROUND(InvertedPrice, 1) = INT(ROUND(InvertedPrice, 1))
+VAR InvertedFormat = IF(IsWholeInverted, "#,##0", "#,##0.0")
+
+VAR TextChaos = 
+    IF(PriceInChaos < 1 && PriceInChaos > 0,
+        "1 c = " & FORMAT(InvertedPrice, InvertedFormat),
+        FORMAT(PriceInChaos, "#,##0") & " c"
+    )
+
+VAR TextDivine = 
+    IF(CurrentItem = "Divine Orb", 
+        TextChaos, 
         IF(PriceInChaos >= DivineAnchor,
-            FORMAT(PriceInDivines, "#,##0.0") & " div",
+            FORMAT(PriceInDivines, DivineFormat) & " div",
             "1 div = " & FORMAT(AmountPerDivine, "#,##0")
         )
     )
-VAR TextAdaptive =
-    IF(CurrentItem = "Divine Orb",
-        TextChaos,
-        IF(PriceInChaos >= DivineAnchor,
-            FORMAT(PriceInDivines, "#,##0.0") & " div",
-            FORMAT(PriceInChaos, "#,##0") & " c"
+
+VAR TextAdaptive = 
+    IF(CurrentItem = "Divine Orb", 
+        TextChaos, 
+        IF(PriceInChaos >= DivineAnchor, 
+            FORMAT(PriceInDivines, DivineFormat) & " div", 
+            IF(PriceInChaos < 1 && PriceInChaos > 0,
+                "1 c = " & FORMAT(InvertedPrice, InvertedFormat),
+                FORMAT(PriceInChaos, "#,##0") & " c"
+            )
         )
     )
-VAR FinalDisplay = IF(CurrentGroup = "General", SelectedDisplay, "Adaptive")
-RETURN SWITCH(
+
+VAR FinalDisplay = SelectedDisplay
+
+RETURN
+SWITCH(
     FinalDisplay,
     "Chaos", TextChaos,
     "Divine", TextDivine,
@@ -694,35 +900,55 @@ RETURN SWITCH(
 **A Solução:** Criei verificações matemáticas usando `INT(ROUND())`.
 **15.1 - Medida Dinâmica:**
 ```dax
-Dynamic Price (Display) =
-VAR SelectedDisplay = SELECTEDVALUE('ValueDisplay'[Display Option], "Adaptive")
-VAR CurrentGroup = MAX('dproduct'[ui_group])
+Dynamic Price (Display) = 
+VAR SelectedDisplay = SELECTEDVALUE('_UI_ValueDisplay'[Display Option], "Adaptive")
+
 VAR CurrentItem = MAX('dproduct'[product_name])
+
 VAR PriceInChaos = [Current Price (Chaos)]
 VAR DivineAnchor = [Divine Price in Chaos]
-VAR PriceInDivines = DIVIDE(PriceInChaos, DivineAnchor)
+
+VAR PriceInDivines = DIVIDE(PriceInChaos, DivineAnchor) 
 VAR AmountPerDivine = DIVIDE(DivineAnchor, PriceInChaos)
+
 VAR IsWholeDivine = ROUND(PriceInDivines, 1) = INT(ROUND(PriceInDivines, 1))
 VAR DivineFormat = IF(IsWholeDivine, "#,##0", "#,##0.0")
-VAR TextChaos = FORMAT(PriceInChaos, "#,##0") & " c"
-VAR TextDivine =
-    IF(CurrentItem = "Divine Orb",
-        TextChaos,
+
+VAR InvertedPrice = DIVIDE(1, PriceInChaos)
+VAR IsWholeInverted = ROUND(InvertedPrice, 1) = INT(ROUND(InvertedPrice, 1))
+VAR InvertedFormat = IF(IsWholeInverted, "#,##0", "#,##0.0")
+
+VAR TextChaos = 
+    IF(PriceInChaos < 1 && PriceInChaos > 0,
+        "1 c = " & FORMAT(InvertedPrice, InvertedFormat),
+        FORMAT(PriceInChaos, "#,##0") & " c"
+    )
+
+VAR TextDivine = 
+    IF(CurrentItem = "Divine Orb", 
+        TextChaos, 
         IF(PriceInChaos >= DivineAnchor,
             FORMAT(PriceInDivines, DivineFormat) & " div",
             "1 div = " & FORMAT(AmountPerDivine, "#,##0")
         )
     )
-VAR TextAdaptive =
-    IF(CurrentItem = "Divine Orb",
-        TextChaos,
-        IF(PriceInChaos >= DivineAnchor,
-            FORMAT(PriceInDivines, DivineFormat) & " div",
-            FORMAT(PriceInChaos, "#,##0") & " c"
+
+VAR TextAdaptive = 
+    IF(CurrentItem = "Divine Orb", 
+        TextChaos, 
+        IF(PriceInChaos >= DivineAnchor, 
+            FORMAT(PriceInDivines, DivineFormat) & " div", 
+            IF(PriceInChaos < 1 && PriceInChaos > 0,
+                "1 c = " & FORMAT(InvertedPrice, InvertedFormat),
+                FORMAT(PriceInChaos, "#,##0") & " c"
+            )
         )
     )
-VAR FinalDisplay = IF(CurrentGroup = "General", SelectedDisplay, "Adaptive")
-RETURN SWITCH(
+
+VAR FinalDisplay = SelectedDisplay
+
+RETURN
+SWITCH(
     FinalDisplay,
     "Chaos", TextChaos,
     "Divine", TextDivine,
@@ -732,16 +958,21 @@ RETURN SWITCH(
 ```
 **15.2 - Cartões de Detalhes:**
 ```dax
-Detail Card (Divine Price) =
+Detail Card (Divine Price) = 
 VAR PriceChaos = [Current Price (Chaos)]
 VAR DivineAnchor = [Divine Price in Chaos]
+
 VAR PriceDivine = DIVIDE(PriceChaos, DivineAnchor)
 VAR AmountPerDivine = DIVIDE(DivineAnchor, PriceChaos)
+
 VAR CurrentItem = MAX('dproduct'[product_name])
+
 VAR IsWholeDivine = ROUND(PriceDivine, 1) = INT(ROUND(PriceDivine, 1))
 VAR DivineFormat = IF(IsWholeDivine, "#,##0", "#,##0.0")
+
 VAR IsWholeAmount = ROUND(AmountPerDivine, 1) = INT(ROUND(AmountPerDivine, 1))
 VAR AmountFormat = IF(IsWholeAmount, "#,##0", "#,##0.0")
+
 RETURN
 IF(
     CurrentItem = "Divine Orb",
@@ -794,30 +1025,50 @@ UNION(
 )
 ```
 ```dax
-Compare Price (Chaos) =
-VAR SelectedCompareLeague = SELECTEDVALUE('CompareLeague'[league_name])
-VAR Result = CALCULATE(
+Compare Price (Chaos) = 
+VAR SelectedCompareLeague = SELECTEDVALUE('_UI_CompareLeague'[league_name])
+
+VAR Result = 
+CALCULATE(
     [Current Price (Chaos)],
     REMOVEFILTERS('dleague'),
     'dleague'[league_name] = SelectedCompareLeague
 )
-RETURN IF(SelectedCompareLeague = " None" || ISBLANK(SelectedCompareLeague), BLANK(), Result)
+
+RETURN
+IF(SelectedCompareLeague = " None" || ISBLANK(SelectedCompareLeague), BLANK(), Result)
 ```
 
 ### 19. UX Sênior: Filtros Inteligentes (Leão de Chácara)
 **O Problema:** O Dropdown de comparação mostrava ligas onde o item filtrado sequer existia, gerando "Caminhos Sem Saída".
 **A Solução:** Criei uma "Medida de Suporte" invisível. Ela atua como regra booleana que avalia se a liga é igual à atual, e usa `COUNTROWS` para verificar se existem registros. Apliquei isso nos filtros visuais para ocultar opções inválidas.
 ```dax
-Filter (Valid Compare League) =
-VAR SlicerLeague = MAX('CompareLeague'[league_name])
+Filter (Valid Compare League) = 
+VAR SlicerLeague = MAX('_UI_CompareLeague'[league_name])
+// Captura a liga original que o usuário trouxe pelo Drill-through
 VAR OriginalLeague = SELECTEDVALUE('dleague'[league_name])
-VAR CheckItems = CALCULATE(COUNTROWS('fItems'), REMOVEFILTERS('dleague'), 'dleague'[league_name] = SlicerLeague)
-VAR CheckCurrency = CALCULATE(COUNTROWS('fCurrency'), REMOVEFILTERS('dleague'), 'dleague'[league_name] = SlicerLeague)
+
+VAR CheckItems = 
+    CALCULATE(
+        COUNTROWS('fItems'),
+        REMOVEFILTERS('dleague'),
+        'dleague'[league_name] = SlicerLeague
+    )
+    
+VAR CheckCurrency = 
+    CALCULATE(
+        COUNTROWS('fCurrency'),
+        REMOVEFILTERS('dleague'),
+        'dleague'[league_name] = SlicerLeague
+    )
+
 RETURN
 IF(
-    SlicerLeague = " None", 1,
+    SlicerLeague = " None", 
+    1, 
     IF(
-        SlicerLeague = OriginalLeague, 0,
+        SlicerLeague = OriginalLeague, // Se for a mesma liga do Drill-through...
+        0,                             // ...toma nota 0 e some do Dropdown.
         IF(CheckItems > 0 || CheckCurrency > 0, 1, 0)
     )
 )
@@ -827,24 +1078,53 @@ IF(
 **O Problema:** Exibir o maior e o menor preço que um item já atingiu. Como a medida é calculada dinamicamente, funções básicas como `MAX()` não funcionam.
 **A Solução:** Utilizei funções iteradoras (`MAXX` e `MINX`) com camadas de segurança (`FILTER`).
 ```dax
-Highest Price (Display) =
-VAR MaxPrice = MAXX(VALUES('dleagueday'[day_index]), [Current Price (Chaos)])
+Highest Price (Display) = 
+VAR MaxPrice = 
+    MAXX(
+        VALUES('dleagueday'[day_index]),
+        [Current Price (Chaos)]
+    )
 VAR InvertedPrice = DIVIDE(1, MaxPrice)
-RETURN IF(ISBLANK(MaxPrice), BLANK(),
-    IF(MaxPrice < 1 && MaxPrice > 0,
-        "1 Chaos = " & FORMAT(InvertedPrice, "#,##0.#") & " units",
-        FORMAT(MaxPrice, "#,##0") & " Chaos"
+
+VAR IsWholeInverted = ROUND(InvertedPrice, 1) = INT(ROUND(InvertedPrice, 1))
+VAR InvertedFormat = IF(IsWholeInverted, "#,##0", "#,##0.0")
+
+VAR IsWholePrice = ROUND(MaxPrice, 1) = INT(ROUND(MaxPrice, 1))
+VAR PriceFormat = IF(IsWholePrice, "#,##0", "#,##0.0")
+
+RETURN
+IF(ISBLANK(MaxPrice), BLANK(),
+    IF(
+        MaxPrice < 1 && MaxPrice > 0,
+        "1 Chaos = " & FORMAT(InvertedPrice, InvertedFormat) & " units",
+        FORMAT(MaxPrice, PriceFormat) & " Chaos"
     )
 )
 ```
 ```dax
-Lowest Price (Display) =
-VAR MinPrice = MINX(FILTER(VALUES('dleagueday'[day_index]), NOT ISBLANK([Current Price (Chaos)])), [Current Price (Chaos)])
+Lowest Price (Display) = 
+VAR MinPrice = 
+    MINX(
+        FILTER(
+            VALUES('dleagueday'[day_index]),
+            NOT ISBLANK([Current Price (Chaos)])
+        ),
+        [Current Price (Chaos)]
+    )
 VAR InvertedPrice = DIVIDE(1, MinPrice)
-RETURN IF(ISBLANK(MinPrice), BLANK(),
-    IF(MinPrice < 1 && MinPrice > 0,
-        "1 Chaos = " & FORMAT(InvertedPrice, "#,##0.#") & " units",
-        FORMAT(MinPrice, "#,##0") & " Chaos"
+
+VAR IsWholeInverted = ROUND(InvertedPrice, 1) = INT(ROUND(InvertedPrice, 1))
+VAR InvertedFormat = IF(IsWholeInverted, "#,##0", "#,##0.0")
+
+VAR IsWholePrice = ROUND(MinPrice, 1) = INT(ROUND(MinPrice, 1))
+VAR PriceFormat = IF(IsWholePrice, "#,##0", "#,##0.0")
+
+RETURN
+IF(ISBLANK(MinPrice), BLANK(),
+    IF(
+        MinPrice < 1 && MinPrice > 0,
+        "1 Chaos = " & FORMAT(InvertedPrice, InvertedFormat) & " units",
+        FORMAT(MinPrice, PriceFormat) & " Chaos"
     )
 )
 ```
@@ -853,15 +1133,32 @@ RETURN IF(ISBLANK(MinPrice), BLANK(),
 **O Problema:** Os preços no jogo sofrem com "ruídos" de fim de semana.
 **A Solução:** Criei uma janela dinâmica de 3 dias usando `FILTER` e `ALL`. Em seguida, o `AVERAGEX` calcula a média de preços.
 ```dax
-Moving Average 3 days (Chaos) =
+Moving Average 3 days (Chaos) = 
 VAR CurrentDay = MAX('dleagueday'[day_index])
-VAR Window3Days = FILTER(ALL('dleagueday'), 'dleagueday'[day_index] <= CurrentDay && 'dleagueday'[day_index] >= CurrentDay - 2)
-RETURN AVERAGEX(Window3Days, [Current Price (Chaos)])
+
+VAR Window3Days = 
+    FILTER(
+        ALL('dleagueday'),
+        'dleagueday'[day_index] <= CurrentDay &&
+        'dleagueday'[day_index] >= CurrentDay - 2
+    )
+
+RETURN
+AVERAGEX(
+    Window3Days,
+    [Current Price (Chaos)]
+)
 ```
 ```dax
-Dynamic Moving Average =
+Dynamic Moving Average = 
 VAR UserChoice = SELECTEDVALUE('_UI_ToggleTrend'[Option], "Hide Trend")
-RETURN IF(UserChoice = "Show Trend", [Moving Average 3 days (Chaos)], BLANK())
+
+RETURN
+IF(
+    UserChoice = "Show Trend",
+    [Moving Average 3 days (Chaos)],
+    BLANK()
+)
 ```
 
 ### 22. QA de Dados e o Motor VertiPaq (A Otimização que não aconteceu)
@@ -886,11 +1183,18 @@ RETURN IF(
 **O Problema:** A Data ficava "congelada" no último dia da liga dentro da Tooltip.
 **A Solução:** O mouse no eixo X filtrava as Tabelas Fato, mas o filtro não subia ("upstream") para a tabela Calendário. Pedi diretamente as datas de dentro das tabelas fato unidas por um `COALESCE` para descongelar.
 ```dax
-Tooltip Date =
+Tooltip Date = 
 VAR ItemDate = MAX('fItems'[date])
 VAR CurrencyDate = MAX('fCurrency'[date])
+
 VAR CurrentDate = COALESCE(ItemDate, CurrencyDate)
-RETURN IF(ISBLANK(CurrentDate), BLANK(), FORMAT(CurrentDate, "ddd MMM dd yyyy"))
+
+RETURN
+IF(
+    ISBLANK(CurrentDate), 
+    BLANK(), 
+    FORMAT(CurrentDate, "ddd MMM dd yyyy")
+)
 ```
 
 ### 25. Controle de Interações (Blindando Cartões)
