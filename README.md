@@ -18,7 +18,7 @@ This project consists of the development of an advanced analytical dashboard in 
 
 The central objective was to replicate and improve upon the logic of existing community platforms, focusing on solving complex challenges in Data Engineering, dimensional modeling, continuous time intelligence, and the application of advanced business rules via DAX for a corporate-level UI/UX experience and intuitive navigation.
 
-https://github.com/user-attachments/assets/44a7d051-1070-4862-bd52-8a7916c72e8d
+https://github.com/user-attachments/assets/1b451a05-e726-436a-b499-82a145a4943e
 
 ## Key Features (What the Dashboard Does)
 * **Dynamic Currency Toggle:** Users can instantly switch the entire dashboard's pricing between "Chaos" or "Divine" via a disconnected parameter table and an absolute global currency anchor.
@@ -57,7 +57,7 @@ Este projeto consiste no desenvolvimento de um dashboard analítico avançado no
 
 O objetivo central foi replicar e aprimorar a lógica de plataformas existentes na comunidade, focando na resolução de desafios complexos de Engenharia de Dados, modelagem dimensional, integridade de tempo contínua e aplicação de regras de negócio avançadas via DAX para uma experiência de UI/UX de nível corporativo e navegação intuitiva.
 
-https://github.com/user-attachments/assets/a6965ebf-3ecd-4ca5-9bc5-805ee9a9df39
+https://github.com/user-attachments/assets/cccdad46-f395-43a1-bbf7-a02a862d8e0c
 
 ## Principais Funcionalidades (O que o Painel Faz)
 * **Conversor de Moeda Dinâmico:** O usuário pode alternar a precificação de todo o painel entre "Chaos" ou "Divine" instantaneamente através de tabelas desconectadas e uma âncora de cotação global.
